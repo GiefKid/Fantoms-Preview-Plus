@@ -1,15 +1,15 @@
 {
-	"id": "FantomsPreview",
-	"name": "Fantoms Preview",
-	"display_name": "Fantoms Preview",
+	"id": "FantomsPreviewPlus",
+	"name": "Fantom's Preview Plus",
+	"display_name": "Fantom's Preview Plus",
 	"author": [
-		"Fantom, Divvy"
+		"Fantom, Divvy, GiefKid"
 	],
 	"description": "A QoL mod for balatro allowing for a preview of score/money before submitting the hand.",
 	"prefix": "fn",
 	"main_file": "CorePreview.lua",
 	"priority": 0,
-	"version": "2.5.0",
+	"version": "1.0.0",
 	"dependencies": [],
-	"conflicts": []
+	"conflicts": ["FantomsPreview", "FantomsAutocalculate"]
 }

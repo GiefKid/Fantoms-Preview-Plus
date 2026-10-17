@@ -40,16 +40,23 @@ FNSJ.simulate_mp_lets_go_gambling = function(joker_obj, context)
       local exact_xmult,  min_xmult, max_xmult = FN.SIM.get_probabilistic_extremes(rand, joker_obj.ability.extra.odds, joker_obj.ability.extra.xmult, 1)
       local exact_money,  min_money,  max_money  = FN.SIM.get_probabilistic_extremes(rand, joker_obj.ability.extra.odds, joker_obj.ability.extra.dollars, 0)
 
+      -- No chips involved, so same "binomial_mult" trial as Bloodstone
+      table.insert(FN.SIM.prob_trials, {kind = "binomial_mult", p = FN.SIM.trigger_probability(joker_obj.ability.extra.odds)})
+      FN.SIM.recognized_trial_in_progress = true
       FN.SIM.add_dollars(exact_money, min_money, max_money)
       FN.SIM.x_mult(exact_xmult, min_xmult, max_xmult)
+      FN.SIM.recognized_trial_in_progress = false
    end
 end
 
 FNSJ.simulate_mp_bloodstone = function(joker_obj, context)
    if context.cardarea == G.play and context.individual then
       if FN.SIM.is_suit(context.other_card, "Hearts") and not context.other_card.debuff then
+         table.insert(FN.SIM.prob_trials, {kind = "binomial_mult", p = FN.SIM.trigger_probability(joker_obj.ability.extra.odds)})
+         FN.SIM.recognized_trial_in_progress = true
          local exact_xmult, min_xmult, max_xmult = FN.SIM.get_probabilistic_extremes(pseudorandom("nopeagain"), joker_obj.ability.extra.odds, joker_obj.ability.extra.Xmult, 1)
          FN.SIM.x_mult(exact_xmult, min_xmult, max_xmult)
+         FN.SIM.recognized_trial_in_progress = false
       end
    end
 end

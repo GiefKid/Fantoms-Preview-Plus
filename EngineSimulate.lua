@@ -38,6 +38,38 @@ if not FN.SIM.run then
          max   = {chips = 0, mult = 0, dollars = 0},
          reps = 0
       }
+      -- One entry per random mult trial (each Lucky Card, Misprint draw, etc.)
+      -- for build_prob_percent. other_range_source gets set by any other mult range.
+      FN.SIM.prob_trials = {}
+      FN.SIM.other_range_source = false
+      -- What else caused a range, for the tooltip (see FN.PRE.classify_range):
+      -- The Hook's discards, jokers that go off your money (Bull, Bootstraps), and
+      -- Lucky Cat (random, but not one of the prob_trials kinds)
+      FN.SIM.hook_range_source = false
+      -- Score for each pair The Hook could discard, for the % and sweep. nil if any pair
+      -- has its own range or a held card is face down
+      FN.SIM.hook_outcomes = nil
+      FN.SIM.money_range_source = false
+      FN.SIM.random_range_source = false
+      FN.SIM.recognized_trial_in_progress = false
+      -- Raised Fist's face-down range still sets other_range_source (so the Misprint
+      -- sweep and % stay off), but it gets its own sweep. non_rf_range_source is set by
+      -- every other mult range, rf_outcomes is the list from raised_fist_outcomes.
+      FN.SIM.raised_fist_in_progress = false
+      FN.SIM.non_rf_range_source = false
+      FN.SIM.rf_outcomes = nil
+      -- Lucky Card money rolls, one {p, amount} per roll (retriggers included). They only
+      -- change the score through Bull/Bootstraps, see FN.PRE.money_mult_outcomes.
+      FN.SIM.money_trials = {}
+      FN.SIM.money_trial_in_progress = false
+      -- Set by any other random money (Business Card, Reserved Parking...)
+      FN.SIM.other_money_range = false
+      -- Bootstraps' part of the mult range, times every xMult after it
+      FN.SIM.money_mult_delta = nil
+      FN.SIM.money_mult_in_progress = false
+      -- Set when money doesn't change the score evenly per roll (Bull/Bootstraps below $0,
+      -- a payout that isn't a multiple of Bootstraps' $5, a random xMult after Bootstraps)
+      FN.SIM.money_nonlinear = false
 
       -- Fetch metadata about simulated play:
       local hand_name, _, poker_hands, scoring_hand, _ = G.FUNCS.get_poker_hand_info(G.hand.highlighted)
@@ -68,12 +100,19 @@ if not FN.SIM.run then
       end
 
       -- Identify held cards and extract necessary data:
-      FN.SIM.env.held_cards = {}
+      -- Face-down cards are skipped so the preview can't leak them. hidden_held marks
+      -- the result as a lower bound, and lets Blackboard/Raised Fist widen their max.
+      FN.SIM.env.held_cards  = {}
+      FN.SIM.env.hidden_held = false
       for _, card in ipairs(G.hand.cards) do
          -- Highlighted cards are simulated as played cards:
          if not card.highlighted then
-            local card_data = FN.SIM.get_card_data(card)
-            table.insert(FN.SIM.env.held_cards, card_data)
+            if FN.PRE.is_hidden(card) then
+               FN.SIM.env.hidden_held = true
+            else
+               local card_data = FN.SIM.get_card_data(card)
+               table.insert(FN.SIM.env.held_cards, card_data)
+            end
          end
       end
 
@@ -83,6 +122,10 @@ if not FN.SIM.run then
          local joker_data = {
             -- P_CENTER keys for jokers have the form j_NAME, get rid of j_
             id = joker.config.center.key:sub(3, #joker.config.center.key),
+            key = joker.config.center.key,
+            -- original_mod is only set on jokers a mod added, not vanilla ones a mod
+            -- took ownership of (see find_unknown_jokers)
+            modded = joker.config.center.original_mod ~= nil,
             ability = copy_table(joker.ability),
             edition = copy_table(joker.edition),
             rarity = joker.config.center.rarity,
@@ -121,11 +164,16 @@ if not FN.SIM.run then
    end
 
    function FN.SIM.get_card_data(card_obj)
+      local ability = copy_table(card_obj.ability)
+      -- Remember how much of ability.bonus comes from the enhancement, so set_ability
+      -- can take it back off (eg. Midas Mask turning a Bonus card to Gold).
+      -- Lives in .ability so the Hook snapshot/restore picks it up too.
+      ability.center_bonus = (card_obj.config.center.config.bonus or 0)
       return {
          rank = card_obj.base.id,
          suit = card_obj.base.suit,
          base_chips = card_obj.base.nominal,
-         ability = copy_table(card_obj.ability),
+         ability = ability,
          edition = copy_table(card_obj.edition),
          seal = card_obj.seal,
          debuff = card_obj.debuff,
@@ -142,8 +190,27 @@ if not FN.SIM.run then
 
       return {
          score   = {min = min_score,        exact = exact_score,        max = max_score},
-         dollars = {min = FNSR.min.dollars, exact = FNSR.exact.dollars, max = FNSR.max.dollars}
+         dollars = {min = FNSR.min.dollars, exact = FNSR.exact.dollars, max = FNSR.max.dollars},
+         unknown_jokers = FN.SIM.find_unknown_jokers()
       }
+   end
+
+   -- Names of modded jokers with no simulate_ function (score might be off), or nil.
+   -- Vanilla ones are skipped, lots have no function on purpose (Splash, Juggler...)
+   function FN.SIM.find_unknown_jokers()
+      local names, seen = {}, {}
+      for _, joker in ipairs(FN.SIM.env.jokers) do
+         if joker.modded and not joker.debuff and not seen[joker.key]
+            and not FN.SIM.JOKERS["simulate_" .. joker.id]
+         then
+            seen[joker.key] = true
+            local name = localize{type = 'name_text', set = 'Joker', key = joker.key}
+            if not name or name == "ERROR" then name = joker.key end
+            names[#names + 1] = name
+         end
+      end
+      if #names == 0 then return nil end
+      return names
    end
 
    --
@@ -187,13 +254,20 @@ if not FN.SIM.run then
       for _, held_card in ipairs(FN.SIM.env.held_cards) do
          FN.SIM.simulate_card_in_context(held_card, G.hand)
       end
+      -- Face-down held cards aren't in env.held_cards, but Reserved Parking can still pay
+      -- on them before the jokers score, so put that in the ceiling for Bull/Bootstraps
+      if FN.SIM.env.hidden_held then
+         FN.SIM.running.max.dollars = FN.SIM.running.max.dollars + FN.PRE.hidden_parking_dollars()
+      end
    end
 
    function FN.SIM.simulate_joker_global_effects()
       for _, joker in ipairs(FN.SIM.env.jokers) do
-         if joker.edition then -- Foil and Holo:
-            if joker.edition.chips then FN.SIM.add_chips(joker.edition.chips) end
-            if joker.edition.mult  then FN.SIM.add_mult(joker.edition.mult) end
+         if not joker.debuff then
+            if joker.edition then -- Foil and Holo:
+               if joker.edition.chips then FN.SIM.add_chips(joker.edition.chips) end
+               if joker.edition.mult  then FN.SIM.add_mult(joker.edition.mult) end
+            end
          end
 
          FN.SIM.simulate_joker(joker, FN.SIM.get_context(G.jokers, {global = true}))
@@ -201,8 +275,10 @@ if not FN.SIM.run then
          -- Joker-on-joker effects (eg. Blueprint):
          FN.SIM.simulate_all_jokers(G.jokers, {other_joker = joker})
 
-         if joker.edition then -- Poly:
-            if joker.edition.x_mult then FN.SIM.x_mult(joker.edition.x_mult) end
+         if not joker.debuff then
+            if joker.edition then -- Poly:
+               if joker.edition.x_mult then FN.SIM.x_mult(joker.edition.x_mult) end
+            end
          end
       end
    end
@@ -236,8 +312,8 @@ if not FN.SIM.run then
          local function flint(data)
             local half_chips = math.floor(data.chips/2 + 0.5)
             local half_mult = math.floor(data.mult/2 + 0.5)
-            data.chips = mod_chips(math.max(half_chips, 0))
-            data.mult  = mod_mult(math.max(half_mult, 1))
+            data.chips = FN.SIM.mod_chips(math.max(half_chips, 0))
+            data.mult  = FN.SIM.mod_mult(math.max(half_mult, 1))
          end
 
          flint(FN.SIM.running.min)
@@ -253,8 +329,8 @@ if not FN.SIM.run then
          local function plasma(data)
             local sum = data.chips + data.mult
             local half_sum = math.floor(sum/2)
-            data.chips = mod_chips(half_sum)
-            data.mult = mod_mult(half_sum)
+            data.chips = FN.SIM.mod_chips(half_sum)
+            data.mult = FN.SIM.mod_mult(half_sum)
          end
 
          plasma(FN.SIM.running.min)
@@ -272,55 +348,63 @@ if not FN.SIM.run then
       -- The following are part of Blind:press_play()
 
       if blind_obj.name == "The Hook" then
-         blind_obj.triggered = true
+         -- press_play sets triggered, but debuff_hand clears it again before the jokers
+         -- score (Hook's debuff = {} still counts), so Matador never pays here
+         blind_obj.triggered = false
 
    local held = FN.SIM.env.held_cards
    local n = #held
-   local combinations = {}
 
-   -- Generate all 0, 1, or 2 card discard combinations
-   for i = 0, math.min(2, n) do
-      if i == 0 then
-         table.insert(combinations, {})
-      elseif i == 1 then
-         for a = 1, n do
-            table.insert(combinations, {a})
-         end
-      elseif i == 2 then
-         for a = 1, n - 1 do
-            for b = a + 1, n do
-               table.insert(combinations, {a, b})
-            end
-         end
+   -- Each Hook pass reruns scoring, and scaling jokers / Hiker / lucky_trigger mutate
+   -- the sim's copies, so reset them between passes or the score keeps climbing.
+   -- Only swap the fields, scoring_cards shares tables with played_cards.
+   local function snapshot_abilities(list)
+      local snap = {}
+      for i, cd in ipairs(list) do snap[i] = copy_table(cd.ability) end
+      return snap
+   end
+
+   local pristine_jokers = snapshot_abilities(FN.SIM.env.jokers)
+   local pristine_played = snapshot_abilities(FN.SIM.env.played_cards)
+   local pristine_held   = snapshot_abilities(held)
+
+   local function restore_sim_state()
+      -- DNA adds its copy to the held list during a pass, take it back off
+      for i = #held, n + 1, -1 do held[i] = nil end
+      for i, joker in ipairs(FN.SIM.env.jokers) do
+         joker.ability = copy_table(pristine_jokers[i])
+      end
+      for i, cd in ipairs(FN.SIM.env.played_cards) do
+         cd.ability = copy_table(pristine_played[i])
+         cd.lucky_trigger = {}
+      end
+      for i, cd in ipairs(held) do
+         cd.ability = copy_table(pristine_held[i])
+         cd.lucky_trigger = {}
       end
    end
 
-   local min_score, max_score = math.huge, -math.huge
-   local min_dollars, max_dollars = math.huge, -math.huge
-
-   for _, discard_idxs in ipairs(combinations) do
-      -- Deep copy held cards
-      local held_copy = {}
-      for i, card in ipairs(held) do
-         held_copy[i] = copy_table(card)
+   -- The Hook discards before the hand scores, so fire discard jokers first
+   -- (Castle, Mail, Ramen, Hit the Road, Yorick)
+   local function simulate_hook_discards(discarded_cards)
+      for _, card in ipairs(discarded_cards) do
+         FN.SIM.simulate_all_jokers(G.hand, {other_card = card, discard = true, full_hand = discarded_cards})
       end
+   end
 
-      -- Remove discard cards from held_copy
-      table.sort(discard_idxs, function(a, b) return a > b end)
-      for _, idx in ipairs(discard_idxs) do
-         table.remove(held_copy, idx)
-      end
-
-      -- Backup and replace held cards temporarily
-      local backup_held = FN.SIM.env.held_cards
-      FN.SIM.env.held_cards = held_copy
-
-      -- Reset sim state
-      FN.SIM.running.min = {chips = 0, mult = 0, dollars = 0}
+   -- One scoring pass with these held cards, after The Hook discards discarded_cards
+   local function hook_probe(held_override, discarded_cards)
+      restore_sim_state()
+      FN.SIM.running.min   = {chips = 0, mult = 0, dollars = 0}
       FN.SIM.running.exact = {chips = 0, mult = 0, dollars = 0}
-      FN.SIM.running.max = {chips = 0, mult = 0, dollars = 0}
-
-      -- Simulate score
+      FN.SIM.running.max   = {chips = 0, mult = 0, dollars = 0}
+      if SP and SP._sim_running then
+         SP._c_chips = 0; SP._c_mult = 0; SP._c_xmult = 1
+         SP._j_chips = 0; SP._j_mult = 0; SP._j_xmult = 1
+      end
+      -- After the reset, so Mail-In money from these discards reaches Bull/Bootstraps
+      simulate_hook_discards(discarded_cards)
+      FN.SIM.env.held_cards = held_override
       FN.SIM.simulate_joker_before_effects()
       FN.SIM.add_base_chips_and_mult()
       FN.SIM.simulate_blind_effects()
@@ -329,16 +413,107 @@ if not FN.SIM.run then
       FN.SIM.simulate_joker_global_effects()
       FN.SIM.simulate_consumable_effects()
       FN.SIM.simulate_deck_effects()
+      return FN.SIM.get_results()
+   end
 
-      -- Evaluate score
-      local res = FN.SIM.get_results()
+   -- Fast path: try with no held cards and with all of them. If both give the same
+   -- score, held cards don't matter and we can skip the combination loop.
+   -- Full-held runs last so running + SP state are left from that one.
+   local res_none = hook_probe({}, held)
+   local res_full = hook_probe(held, {})
+   FN.SIM.env.held_cards = held  -- always restore
+
+   if res_none.score.max == res_full.score.max
+      and res_none.score.min == res_full.score.min then
+      -- Held cards don't matter, use the full-held result
+      FN.SIM.running.min = {chips = res_full.score.min, mult = 1, dollars = res_full.dollars.min}
+      FN.SIM.running.max = {chips = res_full.score.max, mult = 1, dollars = res_full.dollars.max}
+      return true
+   end
+
+   -- The Hook always discards min(2, n) cards (see Blind:press_play), so only
+   -- try combos of that size. Smaller ones can't happen and inflate the max.
+   local combinations = {}
+   local k = math.min(2, n) -- number of cards The Hook will discard
+
+   if k == 0 then
+      table.insert(combinations, {})
+   elseif k == 1 then
+      for a = 1, n do
+         table.insert(combinations, {a})
+      end
+   else -- k == 2
+      for a = 1, n - 1 do
+         for b = a + 1, n do
+            table.insert(combinations, {a, b})
+         end
+      end
+   end
+
+   local min_score, max_score = math.huge, -math.huge
+   local min_dollars, max_dollars = math.huge, -math.huge
+   -- Keep SP breakdown from the max-score run only
+   local best_sp_state = nil
+   -- First combo's result, to tell if the discards actually change anything
+   local first_res = nil
+   -- Every pair is equally likely (The Hook picks 2 different cards at random)
+   local outcomes = not FN.SIM.env.hidden_held and {} or nil
+
+   for _, discard_idxs in ipairs(combinations) do
+      -- Reset first so held_copy is clean too
+      restore_sim_state()
+
+      -- Deep copy held cards
+      local held_copy = {}
+      for i, card in ipairs(held) do
+         held_copy[i] = copy_table(card)
+      end
+
+      -- Grab discarded cards before the indices get shifted by table.remove
+      local discarded_cards = {}
+      for _, idx in ipairs(discard_idxs) do
+         discarded_cards[#discarded_cards + 1] = held[idx]
+      end
+
+      -- Remove discard cards from held_copy
+      table.sort(discard_idxs, function(a, b) return a > b end)
+      for _, idx in ipairs(discard_idxs) do
+         table.remove(held_copy, idx)
+      end
+
+      local res = hook_probe(held_copy, discarded_cards)
+      FN.SIM.env.held_cards = held
+      -- Different discards giving different scores means The Hook matters
+      if not first_res then
+         first_res = res
+      elseif res.score.min ~= first_res.score.min or res.score.max ~= first_res.score.max then
+         FN.SIM.hook_range_source = true
+      end
+      if res.score.max > max_score then
+         max_score = res.score.max
+         -- Save SP state from the best run
+         if SP and SP._sim_running then
+            best_sp_state = {
+               _c_chips = SP._c_chips, _c_mult = SP._c_mult, _c_xmult = SP._c_xmult,
+               _j_chips = SP._j_chips, _j_mult = SP._j_mult, _j_xmult = SP._j_xmult,
+            }
+         end
+      end
       min_score = math.min(min_score, res.score.min)
-      max_score = math.max(max_score, res.score.max)
       min_dollars = math.min(min_dollars, res.dollars.min)
       max_dollars = math.max(max_dollars, res.dollars.max)
+      if outcomes and res.score.min == res.score.max then
+         outcomes[#outcomes + 1] = {score = res.score.min, p = 1 / #combinations}
+      else
+         outcomes = nil
+      end
+   end
+   FN.SIM.hook_outcomes = outcomes
 
-      -- Restore original held cards
-      FN.SIM.env.held_cards = backup_held
+   -- Put back SP state from the best run
+   if best_sp_state and SP and SP._sim_running then
+      SP._c_chips = best_sp_state._c_chips; SP._c_mult = best_sp_state._c_mult; SP._c_xmult = best_sp_state._c_xmult
+      SP._j_chips = best_sp_state._j_chips; SP._j_mult = best_sp_state._j_mult; SP._j_xmult = best_sp_state._j_xmult
    end
 
    -- Overwrite final min/max range based on permutations
@@ -416,8 +591,12 @@ end
 
          -- Mult:
          if card_data.ability.effect == "Lucky Card" then
+            -- Each Lucky Card is its own 1 in 5 roll (see prob_outcomes)
+            table.insert(FN.SIM.prob_trials, {kind = "binomial_add", p = FN.SIM.trigger_probability(5)})
+            FN.SIM.recognized_trial_in_progress = true
             local exact_mult, min_mult, max_mult = FN.SIM.get_probabilistic_extremes(pseudorandom("nope"), 5, card_data.ability.mult, 0)
             FN.SIM.add_mult(exact_mult, min_mult, max_mult)
+            FN.SIM.recognized_trial_in_progress = false
             -- Careful not to overwrite `card_data.lucky_trigger` outright:
             if exact_mult > 0 then card_data.lucky_trigger.exact = true end
             if min_mult > 0 then card_data.lucky_trigger.min = true end
@@ -437,8 +616,11 @@ end
          end
          if card_data.ability.p_dollars > 0 then
             if card_data.ability.effect == "Lucky Card" then
+               table.insert(FN.SIM.money_trials, {p = FN.SIM.trigger_probability(15), amount = card_data.ability.p_dollars})
+               FN.SIM.money_trial_in_progress = true
                local exact_dollars, min_dollars, max_dollars = FN.SIM.get_probabilistic_extremes(pseudorandom("notthistime"), 15, card_data.ability.p_dollars, 0)
                FN.SIM.add_dollars(exact_dollars, min_dollars, max_dollars)
+               FN.SIM.money_trial_in_progress = false
                -- Careful not to overwrite `card_data.lucky_trigger` outright:
                if exact_dollars > 0 then card_data.lucky_trigger.exact = true end
                if min_dollars > 0 then card_data.lucky_trigger.min = true end

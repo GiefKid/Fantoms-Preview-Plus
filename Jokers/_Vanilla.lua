@@ -117,8 +117,14 @@ FNSJ.simulate_8_ball = function(joker_obj, context)
 end
 FNSJ.simulate_misprint = function(joker_obj, context)
    if context.cardarea == G.jokers and context.global then
+      -- One trial per draw, Blueprint/Brainstorm copies run this too.
+      -- span comes from the joker itself in case another mod changes min/max
+      table.insert(FN.SIM.prob_trials, {kind = "uniform", span = joker_obj.ability.extra.max - joker_obj.ability.extra.min})
       local exact_mult = pseudorandom("nope", joker_obj.ability.extra.min, joker_obj.ability.extra.max)
+      -- Flag checked in adjust_field_with_range
+      FN.SIM.recognized_trial_in_progress = true
       FN.SIM.add_mult(exact_mult, joker_obj.ability.extra.min, joker_obj.ability.extra.max)
+      FN.SIM.recognized_trial_in_progress = false
    end
 end
 FNSJ.simulate_dusk = function(joker_obj, context)
@@ -140,8 +146,22 @@ FNSJ.simulate_raised_fist = function(joker_obj, context)
             raised_card = card
          end
       end
-      if raised_card == context.other_card and not context.other_card.debuff then
-         FN.SIM.add_mult(2 * cur_mult)
+      if raised_card == context.other_card then
+         if FN.SIM.env.hidden_held then
+            -- A face-down card could be lower than the known lowest (or debuffed), so the
+            -- range comes from the unseen cards. Still runs if the known card is debuffed,
+            -- a lower face-down card would fire instead.
+            local outcomes = FN.PRE.raised_fist_outcomes(raised_card, FN.PRE.hidden_held_count())
+            if #outcomes > 0 then
+               FN.SIM.rf_outcomes = outcomes
+               local exact = raised_card.debuff and 0 or 2 * cur_mult
+               FN.SIM.raised_fist_in_progress = true
+               FN.SIM.add_mult(exact, outcomes[1].mult, outcomes[#outcomes].mult)
+               FN.SIM.raised_fist_in_progress = false
+            end
+         elseif not context.other_card.debuff then
+            FN.SIM.add_mult(2 * cur_mult)
+         end
       end
    end
 end
@@ -250,8 +270,12 @@ FNSJ.simulate_space = function(joker_obj, context)
       local exact_chips, min_chips, max_chips = FN.SIM.get_probabilistic_extremes(rand, joker_obj.ability.extra, hand_data.l_chips, 0)
       local exact_mult,  min_mult,  max_mult  = FN.SIM.get_probabilistic_extremes(rand, joker_obj.ability.extra, hand_data.l_mult,  0)
 
+      -- One roll decides both chips and mult, so it's a "single_trial" (see prob_outcomes)
+      table.insert(FN.SIM.prob_trials, {kind = "single_trial", p = FN.SIM.trigger_probability(joker_obj.ability.extra)})
+      FN.SIM.recognized_trial_in_progress = true
       FN.SIM.add_chips(exact_chips, min_chips, max_chips)
       FN.SIM.add_mult(exact_mult, min_mult, max_mult)
+      FN.SIM.recognized_trial_in_progress = false
    end
 end
 FNSJ.simulate_egg = function(joker_obj, context)
@@ -270,7 +294,12 @@ FNSJ.simulate_blackboard = function(joker_obj, context)
          end
       end
       if black_suits == all_cards then
-         FN.SIM.x_mult(joker_obj.ability.extra)
+         if FN.SIM.env.hidden_held then
+            -- A face-down card might be red, so only count it toward max
+            FN.SIM.x_mult(1, 1, joker_obj.ability.extra)
+         else
+            FN.SIM.x_mult(joker_obj.ability.extra)
+         end
       end
    end
 end
@@ -294,6 +323,12 @@ FNSJ.simulate_dna = function(joker_obj, context)
       if G.GAME.current_round.hands_played == 0 and #context.full_hand == 1 then
          local new_card = copy_table(context.full_hand[1])
          table.insert(FN.SIM.env.held_cards, new_card)
+         -- The copy counts as a card added to the deck, so Hologram grows before scoring
+         for _, joker in ipairs(FN.SIM.env.jokers) do
+            if joker.id == "hologram" and not joker.debuff then
+               joker.ability.x_mult = joker.ability.x_mult + joker.ability.extra
+            end
+         end
       end
    end
 end
@@ -322,6 +357,11 @@ FNSJ.simulate_faceless = function(joker_obj, context)
    -- Effect not relevant (Discard)
 end
 FNSJ.simulate_green_joker = function(joker_obj, context)
+   -- -1 once per discard (on the last card), only The Hook's discards reach the sim
+   if context.cardarea == G.hand and context.discard and not context.blueprint
+      and context.other_card == context.full_hand[#context.full_hand] and joker_obj.ability.mult ~= 0 then
+      joker_obj.ability.mult = joker_obj.ability.mult - joker_obj.ability.extra.discard_sub
+   end
    if context.cardarea == G.jokers and context.before and not context.blueprint then
       joker_obj.ability.mult = joker_obj.ability.mult + joker_obj.ability.extra.hand_add
    end
@@ -479,7 +519,7 @@ FNSJ.simulate_reserved_parking = function(joker_obj, context)
 end
 FNSJ.simulate_mail = function(joker_obj, context)
    if context.cardarea == G.hand and context.discard then
-      if context.other_card.id == G.GAME.current_round.mail_card.id and not context.other_card.debuff then
+      if FN.SIM.is_rank(context.other_card, G.GAME.current_round.mail_card.id) and not context.other_card.debuff then
          FN.SIM.add_dollars(joker_obj.ability.extra)
       end
    end
@@ -533,7 +573,9 @@ FNSJ.simulate_lucky_cat = function(joker_obj, context)
    end
 
    if context.cardarea == G.jokers and context.global then
-      FN.SIM.x_mult(joker_obj.ability.x_mult_range.exact, joker_obj.ability.x_mult_range.min, joker_obj.ability.x_mult_range.max)
+      local r = joker_obj.ability.x_mult_range
+      if r.min ~= r.max then FN.SIM.random_range_source = true end
+      FN.SIM.x_mult(r.exact, r.min, r.max)
    end
 end
 FNSJ.simulate_baseball = function(joker_obj, context)
@@ -551,6 +593,11 @@ FNSJ.simulate_bull = function(joker_obj, context)
       local min_chips = bull(FN.SIM.running.min)
       local exact_chips = bull(FN.SIM.running.exact)
       local max_chips = bull(FN.SIM.running.max)
+      if min_chips ~= max_chips then
+         FN.SIM.money_range_source = true
+         -- Bull stops at $0, so below that it doesn't go up evenly per roll
+         if G.GAME.dollars + FN.SIM.running.min.dollars < 0 then FN.SIM.money_nonlinear = true end
+      end
       FN.SIM.add_chips(exact_chips, min_chips, max_chips)
    end
 end
@@ -696,8 +743,12 @@ end
 FNSJ.simulate_bloodstone = function(joker_obj, context)
    if context.cardarea == G.play and context.individual then
       if FN.SIM.is_suit(context.other_card, "Hearts") and not context.other_card.debuff then
+         -- Each scored Heart is its own roll, xmult on hit
+         table.insert(FN.SIM.prob_trials, {kind = "binomial_mult", p = FN.SIM.trigger_probability(joker_obj.ability.extra.odds)})
+         FN.SIM.recognized_trial_in_progress = true
          local exact_xmult, min_xmult, max_xmult = FN.SIM.get_probabilistic_extremes(pseudorandom("nopeagain"), joker_obj.ability.extra.odds, joker_obj.ability.extra.Xmult, 1)
          FN.SIM.x_mult(exact_xmult, min_xmult, max_xmult)
+         FN.SIM.recognized_trial_in_progress = false
       end
    end
 end
@@ -846,10 +897,15 @@ FNSJ.simulate_matador = function(joker_obj, context)
          FN.SIM.add_dollars(joker_obj.ability.extra)
       end
    end
+   -- Bosses that trigger without debuffing (The Ox, The Arm) pay while jokers score,
+   -- so Bull/Bootstraps to the right count it
+   if context.cardarea == G.jokers and context.global and G.GAME.blind.triggered then
+      FN.SIM.add_dollars(joker_obj.ability.extra)
+   end
 end
 FNSJ.simulate_hit_the_road = function(joker_obj, context)
    if context.cardarea == G.hand and context.discard and not context.blueprint then
-      if context.other_card.id == 11 and not context.other_card.debuff then
+      if FN.SIM.is_rank(context.other_card, 11) and not context.other_card.debuff then
          joker_obj.ability.x_mult = joker_obj.ability.x_mult + joker_obj.ability.extra
       end
    end
@@ -915,12 +971,23 @@ end
 FNSJ.simulate_bootstraps = function(joker_obj, context)
    if context.cardarea == G.jokers and context.global then
       local function bootstraps(data)
-         return joker_obj.ability.extra.mult * math.floor((G.GAME.dollars + data.dollars) / joker_obj.ability.extra.dollars)
+         return joker_obj.ability.extra.mult * math.max(0, math.floor((G.GAME.dollars + data.dollars) / joker_obj.ability.extra.dollars))
       end
       local min_mult = bootstraps(FN.SIM.running.min)
       local exact_mult = bootstraps(FN.SIM.running.exact)
       local max_mult = bootstraps(FN.SIM.running.max)
+      if min_mult ~= max_mult then
+         FN.SIM.money_range_source = true
+         FN.SIM.money_mult_delta = (FN.SIM.money_mult_delta or 0) + (max_mult - min_mult)
+         -- Even steps per roll only if each payout is a multiple of $5 (Lucky's $20 is)
+         if G.GAME.dollars + FN.SIM.running.min.dollars < 0 then FN.SIM.money_nonlinear = true end
+         for _, t in ipairs(FN.SIM.money_trials) do
+            if t.amount % joker_obj.ability.extra.dollars ~= 0 then FN.SIM.money_nonlinear = true end
+         end
+      end
+      FN.SIM.money_mult_in_progress = true
       FN.SIM.add_mult(exact_mult, min_mult, max_mult)
+      FN.SIM.money_mult_in_progress = false
    end
 end
 FNSJ.simulate_caino = function(joker_obj, context)

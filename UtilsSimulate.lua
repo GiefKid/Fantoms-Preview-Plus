@@ -63,12 +63,30 @@ function FN.SIM.get_probabilistic_extremes(random_value, odds, reward, default)
    return exact, min, max
 end
 
+-- Chance an effect with these odds triggers, for build_prob_percent.
+-- Oops! All 6s is covered since it just raises probabilities.normal.
+function FN.SIM.trigger_probability(odds)
+   return math.min(1, G.GAME.probabilities.normal / odds)
+end
+
 function FN.SIM.adjust_field_with_range(adj_func, field, mod_func, exact_value, min_value, max_value)
    if not exact_value then error("Cannot adjust field, exact_value is missing.") end
 
    if not min_value or not max_value then
       min_value = exact_value
       max_value = exact_value
+   end
+
+   -- Flag mult ranges that aren't from a known random source (Misprint, Space, Lucky etc.)
+   -- so the sweep and % turn off. Bootstraps is handled separately
+   if field == "mult" and min_value ~= max_value and not FN.SIM.recognized_trial_in_progress
+      and not FN.SIM.money_mult_in_progress then
+      FN.SIM.other_range_source = true
+      if not FN.SIM.raised_fist_in_progress then FN.SIM.non_rf_range_source = true end
+   end
+   -- Same for money, only Lucky Card money is known
+   if field == "dollars" and min_value ~= max_value and not FN.SIM.money_trial_in_progress then
+      FN.SIM.other_money_range = true
    end
 
    FN.SIM.running.min[field]   = mod_func(adj_func(FN.SIM.running.min[field],   min_value))
@@ -97,6 +115,14 @@ function FN.SIM.add_mult(exact, min, max)
 end
 
 function FN.SIM.x_mult(exact, min, max)
+   -- Scale Bootstraps' money range too, a random xMult would make it uneven
+   if FN.SIM.money_mult_delta then
+      if min and max and min ~= max then
+         FN.SIM.money_nonlinear = true
+      else
+         FN.SIM.money_mult_delta = FN.SIM.money_mult_delta * exact
+      end
+   end
    FN.SIM.adjust_field_with_range(function(x, y) return x * y end, "mult", FN.SIM.mod_mult, exact, min, max)
 end
 
@@ -148,6 +174,8 @@ function FN.SIM.is_rank(card_data, ranks)
 end
 
 function FN.SIM.check_rank_parity(card_data, check_even)
+   -- Stone cards have no rank (get_id() is negative), even though card_data.rank is still set
+   if card_data.ability.effect == "Stone Card" then return false end
    if check_even then
       local is_even_numbered = (card_data.rank <= 10 and card_data.rank >= 0 and card_data.rank % 2 == 0)
       return is_even_numbered
@@ -159,12 +187,18 @@ function FN.SIM.check_rank_parity(card_data, check_even)
 end
 
 function FN.SIM.is_face(card_data)
+   -- Same as Card:is_face(), debuffed cards are never faces (even with Pareidolia)
+   if card_data.debuff then return false end
    return (FN.SIM.is_rank(card_data, {11, 12, 13}) or next(find_joker("Pareidolia")))
 end
 
 function FN.SIM.set_ability(card_data, center)
    -- See Card:set_ability()
+   -- Swap out the old enhancement's bonus chips for the new one's
+   local old_center_bonus = (card_data.ability and card_data.ability.center_bonus) or 0
+   local new_center_bonus = center.config.bonus or 0
    card_data.ability = {
+      center_bonus = new_center_bonus,
       name = center.name,
       effect = center.effect,
       set = center.set,
@@ -184,7 +218,7 @@ function FN.SIM.set_ability(card_data, center)
       order = center.order or nil,
       forced_selection = card_data.ability and card_data.ability.forced_selection or nil,
       perma_bonus = card_data.ability and card_data.ability.perma_bonus or 0,
-      bonus = (card_data.ability and card_data.ability.bonus or 0) + (center.config.bonus or 0)
+      bonus = (card_data.ability and card_data.ability.bonus or 0) - old_center_bonus + new_center_bonus
    }
 end
 

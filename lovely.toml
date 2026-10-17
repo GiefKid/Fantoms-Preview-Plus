@@ -5,7 +5,7 @@ priority = 0
 
 # This manifest assumes the following release structure:
 #
-# Fantoms-Preview
+# Fantoms-Preview-Plus
 
 [[patches]]
 [patches.copy]
